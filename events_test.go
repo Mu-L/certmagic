@@ -31,7 +31,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestEventObservable(t *testing.T) {
+func TestShouldEmit(t *testing.T) {
 	noop := func(context.Context, string, map[string]any) error { return nil }
 
 	for _, tc := range []struct {
@@ -51,42 +51,42 @@ func TestEventObservable(t *testing.T) {
 		},
 		{
 			name:    "handler says it has a subscriber",
-			cfg:     Config{OnEvent: noop, HasEventSubscribersFunc: func(string) bool { return true }},
+			cfg:     Config{OnEvent: noop, ShouldEmitFunc: func(string) bool { return true }},
 			expects: true,
 		},
 		{
 			name:    "handler says it has no subscriber",
-			cfg:     Config{OnEvent: noop, HasEventSubscribersFunc: func(string) bool { return false }},
+			cfg:     Config{OnEvent: noop, ShouldEmitFunc: func(string) bool { return false }},
 			expects: false,
 		},
 		{
 			name:    "no handler outweighs a subscriber claim",
-			cfg:     Config{HasEventSubscribersFunc: func(string) bool { return true }},
+			cfg:     Config{ShouldEmitFunc: func(string) bool { return true }},
 			expects: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.cfg.eventHasSubscriber("tls_get_certificate"); got != tc.expects {
-				t.Errorf("eventHasSubscriber() = %v, want %v", got, tc.expects)
+			if got := tc.cfg.shouldEmit("tls_get_certificate"); got != tc.expects {
+				t.Errorf("shouldEmit() = %v, want %v", got, tc.expects)
 			}
 		})
 	}
 }
 
-// The event name has to reach HasEventSubscribersFunc, or a caller cannot
+// The event name has to reach ShouldEmitFunc, or a caller cannot
 // distinguish the handshake event from the rest.
 func TestShouldEmitReceivesEventName(t *testing.T) {
 	var asked []string
 	cfg := Config{
-		OnEvent:                 func(context.Context, string, map[string]any) error { return nil },
-		HasEventSubscribersFunc: func(name string) bool { asked = append(asked, name); return false },
+		OnEvent:        func(context.Context, string, map[string]any) error { return nil },
+		ShouldEmitFunc: func(name string) bool { asked = append(asked, name); return false },
 	}
 
-	cfg.eventHasSubscriber("cert_obtained")
-	cfg.eventHasSubscriber("tls_get_certificate")
+	cfg.shouldEmit("cert_obtained")
+	cfg.shouldEmit("tls_get_certificate")
 
 	if len(asked) != 2 || asked[0] != "cert_obtained" || asked[1] != "tls_get_certificate" {
-		t.Errorf("HasEventSubscribersFunc was asked about %v", asked)
+		t.Errorf("ShouldEmitFunc was asked about %v", asked)
 	}
 }
 
@@ -144,10 +144,10 @@ func handshakeConfig(tb testing.TB, onEvent func(context.Context, string, map[st
 	tb.Cleanup(cache.Stop)
 
 	cfg = New(cache, Config{
-		Storage:                 &FileStorage{Path: tb.TempDir()},
-		Logger:                  zap.NewNop(),
-		OnEvent:                 onEvent,
-		HasEventSubscribersFunc: hasSubs,
+		Storage:        &FileStorage{Path: tb.TempDir()},
+		Logger:         zap.NewNop(),
+		OnEvent:        onEvent,
+		ShouldEmitFunc: hasSubs,
 	})
 	if _, err := cfg.CacheUnmanagedTLSCertificate(context.Background(), testCertificate(tb), nil); err != nil {
 		tb.Fatal(err)
@@ -239,4 +239,59 @@ func benchmarkGetCertificate(b *testing.B, cfg *Config) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// The predicate is written against a particular OnEvent, so a config that
+// brings its own handler must not inherit Default's predicate: it knows
+// nothing about that handler and would silence it.
+func TestShouldEmitFuncInheritedWithOnEvent(t *testing.T) {
+	defaultOnEvent := func(context.Context, string, map[string]any) error { return nil }
+	defaultPredicate := func(string) bool { return false }
+
+	oldOnEvent, oldPredicate := Default.OnEvent, Default.ShouldEmitFunc
+	Default.OnEvent, Default.ShouldEmitFunc = defaultOnEvent, defaultPredicate
+	t.Cleanup(func() { Default.OnEvent, Default.ShouldEmitFunc = oldOnEvent, oldPredicate })
+
+	newConfig := func(tb testing.TB, cfg Config) *Config {
+		tb.Helper()
+		var out *Config
+		cache := NewCache(CacheOptions{
+			GetConfigForCert: func(Certificate) (*Config, error) { return out, nil },
+			Logger:           zap.NewNop(),
+		})
+		tb.Cleanup(cache.Stop)
+		cfg.Storage = &FileStorage{Path: tb.TempDir()}
+		cfg.Logger = zap.NewNop()
+		out = New(cache, cfg)
+		return out
+	}
+
+	t.Run("own handler does not inherit the predicate", func(t *testing.T) {
+		cfg := newConfig(t, Config{
+			OnEvent: func(context.Context, string, map[string]any) error { return nil },
+		})
+		if cfg.ShouldEmitFunc != nil {
+			t.Error("inherited Default's predicate onto a caller's own OnEvent")
+		}
+		if !cfg.shouldEmit("tls_get_certificate") {
+			t.Error("caller's handler is being silenced")
+		}
+	})
+
+	t.Run("inherited handler brings its predicate", func(t *testing.T) {
+		cfg := newConfig(t, Config{})
+		if cfg.ShouldEmitFunc == nil {
+			t.Fatal("did not inherit Default's predicate alongside Default's OnEvent")
+		}
+		if cfg.shouldEmit("tls_get_certificate") {
+			t.Error("Default's predicate is not being consulted")
+		}
+	})
+
+	t.Run("own predicate is kept", func(t *testing.T) {
+		cfg := newConfig(t, Config{ShouldEmitFunc: func(string) bool { return true }})
+		if !cfg.shouldEmit("tls_get_certificate") {
+			t.Error("caller's own predicate was replaced")
+		}
+	})
 }

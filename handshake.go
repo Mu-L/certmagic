@@ -53,7 +53,7 @@ func (cfg *Config) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certif
 func (cfg *Config) GetCertificateWithContext(ctx context.Context, clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// this runs for every handshake, and building the event's data is not
 	// free, so don't do it unless something is actually listening
-	if cfg.eventHasSubscriber("tls_get_certificate") {
+	if cfg.shouldEmit("tls_get_certificate") {
 		if err := cfg.emit(ctx, "tls_get_certificate", map[string]any{"client_hello": clientHelloWithoutConn(clientHello)}); err != nil {
 			cfg.Logger.Error("TLS handshake aborted by event handler",
 				zap.String("server_name", clientHello.ServerName),

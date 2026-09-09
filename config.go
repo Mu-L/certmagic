@@ -70,12 +70,15 @@ type Config struct {
 	// ignore returned errors.
 	OnEvent func(ctx context.Context, event string, data map[string]any) error
 
-	// An optional callback reporting whether OnEvent
-	// has a subscriber for the named event. If unset,
-	// every event is assumed observed. Lets CertMagic
-	// skip building data nobody will see; it is called
-	// concurrently during handshakes, so keep it fast.
-	HasEventSubscribersFunc func(event string) bool
+	// An optional callback reporting whether an event
+	// is worth emitting. Returning false skips the
+	// OnEvent call entirely, so it must account for
+	// everything OnEvent does -- logging, metrics --
+	// not only subscribed handlers, and must never
+	// answer no for an event something would observe.
+	// If unset, every event is emitted. Called during
+	// handshakes and concurrently; keep it fast.
+	ShouldEmitFunc func(event string) bool
 
 	// DefaultServerName specifies a server name
 	// to use when choosing a certificate if the
@@ -266,9 +269,12 @@ func newWithCache(certCache *Cache, cfg Config) *Config {
 	}
 	if cfg.OnEvent == nil {
 		cfg.OnEvent = Default.OnEvent
-	}
-	if cfg.HasEventSubscribersFunc == nil {
-		cfg.HasEventSubscribersFunc = Default.HasEventSubscribersFunc
+		// the predicate is written for a specific handler, so it only
+		// comes along with the handler it belongs to; inheriting it onto
+		// a caller's own OnEvent could silence events it wants
+		if cfg.ShouldEmitFunc == nil {
+			cfg.ShouldEmitFunc = Default.ShouldEmitFunc
+		}
 	}
 	if cfg.KeySource == nil {
 		cfg.KeySource = Default.KeySource
@@ -1364,18 +1370,18 @@ func (cfg *Config) emit(ctx context.Context, eventName string, data map[string]a
 	return cfg.OnEvent(ctx, eventName, data)
 }
 
-// eventHasSubscriber reports whether emitting the named event could reach
+// shouldEmit reports whether emitting the named event could reach
 // anything. Callers use it to avoid building an event's data when nothing
 // will see it; emit() cannot do that itself, since Go evaluates arguments
 // before it is entered. Only worth consulting on hot paths.
-func (cfg *Config) eventHasSubscriber(eventName string) bool {
+func (cfg *Config) shouldEmit(eventName string) bool {
 	if cfg.OnEvent == nil {
 		return false
 	}
-	if cfg.HasEventSubscribersFunc == nil {
+	if cfg.ShouldEmitFunc == nil {
 		return true // no way to ask; assume it is
 	}
-	return cfg.HasEventSubscribersFunc(eventName)
+	return cfg.ShouldEmitFunc(eventName)
 }
 
 // CertificateSelector is a type which can select a certificate to use given multiple choices.
